@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
@@ -88,10 +89,40 @@
         const resultsArea = $('results');
         const initialMessage = $('initialMessage');
 
-        // Variables de entorno para la configuración de la API (asumidas)
-        // En este entorno, las variables como __app_id y __firebase_config no son necesarias para la llamada directa al API de búsqueda.
+        // Variables de entorno
         const apiKey = ""; 
         const API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:search?key=" + apiKey;
+
+        // Implementación de Reintento con Backoff Exponencial
+        async function fetchWithRetry(url, options, retries = 3) {
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const response = await fetch(url, options);
+
+                    // Si no es un código 200 (OK), intentamos leer el error detallado
+                    if (!response.ok) {
+                        const errorBody = await response.json().catch(() => ({ message: "No se pudo obtener el cuerpo del error." }));
+                        
+                        // Si el error es 4xx o 5xx, lo registramos y lanzamos la excepción con el detalle
+                        console.error(`Intento ${i + 1} fallido con estado ${response.status}:`, errorBody);
+                        
+                        // Lanzamos una excepción con el mensaje de error de Google
+                        const errorMessage = errorBody.error?.message || errorBody.message || "Error de API desconocido.";
+                        throw new Error(`Error en la API: HTTP ${response.status} - ${errorMessage}`);
+                    }
+                    return response;
+                } catch (error) {
+                    if (i < retries - 1) {
+                        // Espera con backoff exponencial
+                        const delay = Math.pow(2, i) * 1000; // 1s, 2s, 4s de espera
+                        console.warn(`Error transitorio detectado, reintentando en ${delay / 1000}s...`, error.message);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                    } else {
+                        throw error; // Último intento fallido, lanzamos el error final
+                    }
+                }
+            }
+        }
 
         function setUILoading(isLoading) {
             searchQueryInput.disabled = isLoading;
@@ -112,7 +143,7 @@
                 const title = result.id || 'Documento sin título';
                 const snippet = result.summarized_content || 'Contenido no disponible o demasiado corto.';
                 
-                // Generamos un URL de ejemplo con el ID del documento si es un ID de documento
+                // Generamos un URL de ejemplo con el ID del documento
                 const mockUrl = `https://drive.google.com/open?id=${result.id}`; 
 
                 resultsHTML += `
@@ -138,7 +169,7 @@
             initialMessage.classList.add('hidden');
             resultsArea.innerHTML = ''; 
 
-            console.log(`Iniciando búsqueda real en Google Drive con la consulta: "${query}"`);
+            console.log(`Iniciando búsqueda en Google Drive con la consulta: "${query}"`);
 
             const payload = {
                 tool: {
@@ -152,16 +183,12 @@
             };
             
             try {
-                // Realizar la llamada al API
-                const response = await fetch(API_URL, {
+                // Usamos fetchWithRetry para mayor estabilidad
+                const response = await fetchWithRetry(API_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-
-                if (!response.ok) {
-                    throw new Error(`Error en la API: ${response.status} ${response.statusText}`);
-                }
 
                 const result = await response.json();
                 
@@ -172,11 +199,20 @@
                 renderResults(searchResults);
 
             } catch (error) {
-                console.error("Fallo al ejecutar la búsqueda:", error);
+                console.error("Fallo final al ejecutar la búsqueda:", error);
+                
+                // Mostramos un error más detallado en la UI
+                const displayMessage = error.message.includes("Error en la API") 
+                    ? `Error: ${error.message}` 
+                    : `Error de conexión: ${error.message}. Revise la consola.`;
+
                 resultsArea.innerHTML = `
-                    <div class="p-4 bg-red-100 border border-red-400 text-red-700 rounded-xl">
-                        Error al conectar con el servicio de búsqueda. Revise la consola para más detalles.
+                    <div class="p-4 bg-red-100 border border-red-400 text-red-700 rounded-xl font-semibold">
+                        ${displayMessage}
                     </div>
+                    <p class="text-sm text-gray-600 mt-2">
+                        Si el error persiste, es probable que se deba a permisos de acceso a Google Drive en este entorno.
+                    </p>
                 `;
             } finally {
                 setUILoading(false);
